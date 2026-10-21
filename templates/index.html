@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SAFE-NET Satellite Alert</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>🚨 SAFE-NET</h1>
+    <p>Satellite-Assisted Instant Emergency Alert System</p>
+  </div>
+  <div id="mode" class="badge">{{ mode }}</div>
+</header>
+
+<main>
+<section class="stats">
+  <div><span>System</span><b id="system">—</b></div>
+  <div><span>Satellite detections</span><b id="count">0</b></div>
+  <div><span>Critical alerts</span><b id="critical">0</b></div>
+  <div><span>Last update</span><b id="updated">—</b></div>
+</section>
+
+<section class="grid">
+  <div class="panel map-panel">
+    <div class="panel-title">LIVE SATELLITE HAZARD MAP</div>
+    <div id="map"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-title">INSTANT ALERTS</div>
+    <div id="feed-status" role="status" aria-live="polite"></div>
+    <div id="alerts"></div>
+  </div>
+</section>
+
+<section class="panel architecture">
+  <div class="panel-title">PIPELINE</div>
+  <div class="pipeline">
+    <span>🛰️ Satellite</span><i>→</i>
+    <span>📡 Data API</span><i>→</i>
+    <span>🧠 Risk Engine</span><i>→</i>
+    <span>📍 Geofence</span><i>→</i>
+    <span>🚨 Instant Notification</span>
+  </div>
+  <p class="note">
+    Current live connector: NASA FIRMS active-fire satellite products.
+    Flood/landslide connectors can be added as authorized data feeds become available.
+  </p>
+  <button onclick="enableNotifications()">Enable browser notifications</button>
+  <button onclick="refreshNow()">Refresh satellite feed</button>
+</section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([28.5, 84.1], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+let markers = [];
+let known = new Set();
+
+function setFeedStatus(message) {
+  document.getElementById("feed-status").textContent = message;
+}
+
+function clearMarkers() {
+  markers.forEach(m => map.removeLayer(m));
+  markers = [];
+}
+
+function notify(a) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (known.has(a.id)) return;
+  known.add(a.id);
+  new Notification("SAFE-NET " + a.level, {
+    body: `${a.hazard} at ${a.lat.toFixed(3)}, ${a.lon.toFixed(3)} | FRP ${a.frp}`,
+    tag: a.id
+  });
+}
+
+function appendTextElement(parent, tagName, text, className) {
+  const element = document.createElement(tagName);
+  element.textContent = text;
+  if (className) element.className = className;
+  parent.appendChild(element);
+  return element;
+}
+
+function render(data) {
+  document.getElementById("system").textContent = data.mode;
+  document.getElementById("count").textContent = data.fires.length;
+  document.getElementById("critical").textContent =
+    data.alerts.filter(a => a.level === "CRITICAL").length;
+  document.getElementById("updated").textContent =
+    data.last_update ? new Date(data.last_update).toLocaleString() : "—";
+
+  clearMarkers();
+  data.fires.forEach(f => {
+    const marker = L.circleMarker([f.latitude, f.longitude], {
+      radius: Math.max(5, Math.min(14, f.frp / 8)),
+      weight: 2
+    }).addTo(map);
+    const popup = document.createElement("div");
+    appendTextElement(popup, "b", "Satellite hotspot");
+    appendTextElement(popup, "div", `FRP: ${f.frp}`);
+    appendTextElement(popup, "div", `Satellite: ${f.satellite}`);
+    appendTextElement(popup, "div", `Time: ${f.acq_date} ${f.acq_time}`);
+    marker.bindPopup(popup);
+    markers.push(marker);
+  });
+
+  const box = document.getElementById("alerts");
+  box.replaceChildren();
+  if (data.alerts.length === 0) {
+    appendTextElement(box, "div", "No active satellite fire alerts in the monitored area.", "empty");
+  } else {
+    data.alerts.slice(0, 20).forEach(a => {
+      const alert = document.createElement("div");
+      alert.className = `alert ${a.level.toLowerCase()}`;
+
+      const header = document.createElement("div");
+      header.className = "alert-head";
+      appendTextElement(header, "b", `🚨 ${a.level}`);
+      appendTextElement(header, "span", a.satellite);
+      alert.appendChild(header);
+
+      appendTextElement(alert, "strong", a.hazard);
+      appendTextElement(alert, "small", `${a.lat.toFixed(4)}, ${a.lon.toFixed(4)} · FRP ${a.frp}`);
+      appendTextElement(alert, "p", a.message);
+      box.appendChild(alert);
+    });
+    data.alerts.slice(0, 10).forEach(notify);
+  }
+
+  setFeedStatus(data.error ? `Feed warning: ${data.error}` : "");
+}
+
+async function fetchData(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error(`Request failed (${response.status} ${response.statusText})`);
+  }
+  return response.json();
+}
+
+async function load() {
+  try {
+    render(await fetchData("/api/status"));
+  } catch (error) {
+    setFeedStatus(`Unable to load satellite status: ${error.message}`);
+  }
+}
+
+async function refreshNow() {
+  setFeedStatus("Refreshing satellite feed…");
+  try {
+    render(await fetchData("/api/refresh", {method:"POST"}));
+  } catch (error) {
+    setFeedStatus(`Unable to refresh satellite feed: ${error.message}`);
+  }
+}
+
+async function enableNotifications() {
+  if (!("Notification" in window)) {
+    alert("Browser notifications are not supported here.");
+    return;
+  }
+  const p = await Notification.requestPermission();
+  alert(p === "granted" ? "Notifications enabled." : "Notification permission was not granted.");
+}
+
+setFeedStatus("Connecting to satellite feed…");
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>
